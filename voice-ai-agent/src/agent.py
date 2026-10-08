@@ -1,15 +1,10 @@
 import asyncio
 import logging
-import threading
-import uuid
 
 from dotenv import load_dotenv
 
 import db
-import questions
-import rag
-
-from prompts import build_instructions, TEACHING_RULES, history_block
+from prompts import build_instructions
 
 from livekit.agents import (
     Agent,
@@ -29,84 +24,159 @@ from livekit.plugins import ai_coustics
 from livekit.plugins import sarvam
 
 
-logger = logging.getLogger("agent")
+# ============================================================
+# CONFIG
+# ============================================================
 
 load_dotenv(".env.local")
 
+logger = logging.getLogger("agent")
+
+
+# ============================================================
+# ASSISTANT
+# ============================================================
+
 class Assistant(Agent):
     def __init__(self) -> None:
-        profile = db.topic_profile()
         super().__init__(
-            instructions=build_instructions() + TEACHING_RULES + history_block(profile)
+            # IMPORTANT:
+            # Keep this because your AgentSession does not currently
+            # configure an LLM separately.
+            llm=inference.LLM(
+                model="google/gemma-4-31b-it"
+            ),
+            instructions=build_instructions(
+                db.get_profile(),
+                db.recent_interviews(),
+                db.weakest_dimension(),
+            ),
         )
-        self.session_id = uuid.uuid4().hex[:8]
-        self.asked_ids: set[str] = set()
-        threading.Thread(target=rag.warmup, daemon=True).start()
+
+    # ========================================================
+    # SAVE CANDIDATE PROFILE
+    # ========================================================
 
     @function_tool
-    async def save_score(
-        self, context: RunContext, topic: str, question: str, score: int, feedback: str
+    async def save_profile(
+        self,
+        context: RunContext,
+        name: str = "",
+        hometown: str = "",
+        education: str = "",
+        optional_subject: str = "",
+        hobbies: str = "",
+        work_experience: str = "",
+        service_preference: str = "",
+        medium: str = "",
     ) -> str:
-        """Save the student's score after judging their answer.
+        """Save the candidate's background details so they do not have to repeat them next time.
+        Fill only the fields the candidate has actually shared.
 
         Args:
-            topic: Short topic name in English, for example "photosynthesis" or "binary search".
-            question: The question you asked.
-            score: Score from 0 to 10 based on how correct the answer was.
-            feedback: One short line of feedback.
+            name: Candidate's name.
+            hometown: Hometown, district or home state.
+            education: Graduation subject and college.
+            optional_subject: UPSC optional subject, if any.
+            hobbies: Hobbies and interests.
+            work_experience: Work experience, if any.
+            service_preference: Preferred services, for example IAS or IFS.
+            medium: Preferred interview language, English or Hindi.
         """
-        score = max(0, min(10, int(score)))
-        topic_key = topic.lower().strip().replace(" ", "_")
-        await asyncio.to_thread(
-            db.save_score, self.session_id, topic_key, None, question, score, feedback
+
+        fields = dict(
+            name=name,
+            hometown=hometown,
+            education=education,
+            optional_subject=optional_subject,
+            hobbies=hobbies,
+            work_experience=work_experience,
+            service_preference=service_preference,
+            medium=medium,
         )
+
+        await asyncio.to_thread(
+            db.save_profile,
+            fields,
+        )
+
         return "Saved."
 
-    @function_tool
-    async def get_session_summary(self, context: RunContext) -> str:
-        """Get how many questions the student answered this session and their average score."""
-        s = await asyncio.to_thread(db.session_summary, self.session_id)
-        return f"Answered {s['answered']} questions, average {s['average']} out of 10."
+    # ========================================================
+    # SAVE INTERVIEW RESULT
+    # ========================================================
 
     @function_tool
-    async def search_notes(self, context: RunContext, query: str) -> str:
-        """Search the student's own uploaded study notes. Use ONLY when the student
-        refers to their notes, book or syllabus.
+    async def save_interview_result(
+        self,
+        context: RunContext,
+        intensity: str,
+        clarity: int,
+        depth: int,
+        balance: int,
+        awareness: int,
+        authenticity: int,
+        composure: int,
+        topics_covered: str,
+        summary: str,
+    ) -> str:
+        """Save the evaluation at the end of the interview. Call this before giving spoken feedback.
 
         Args:
-            query: A short search query written in ENGLISH.
+            intensity: gentle, standard or tough.
+            clarity: Score 0 to 10 for structured, to-the-point answers.
+            depth: Score 0 to 10 for analytical depth.
+            balance: Score 0 to 10 for seeing multiple sides.
+            awareness: Score 0 to 10 for knowledge of background, state and current issues.
+            authenticity: Score 0 to 10 for honesty and not bluffing.
+            composure: Score 0 to 10 for calm and confidence under cross-questioning.
+            topics_covered: Short comma-separated list of topics asked about.
+            summary: One or two sentences summarising performance.
         """
-        hits = await asyncio.to_thread(rag.search, query)
-        if not hits:
-            return "The student's notes do not cover this. Answer from your own general knowledge instead."
-        return "\n\n".join(f"[{h['source']}] {h['text']}" for h in hits)
 
-    @function_tool
-    async def get_assessment_question(self, context: RunContext, topic: str) -> str:
-        """Get a fixed question from the standard assessment bank. Use ONLY when the
-        student asks for a formal test or exam-style round.
+        intensity = intensity.lower().strip()
 
-        Args:
-            topic: The topic name, for example "photosynthesis" or "newton's laws".
-        """
-        key, q = questions.pick_next(topic, self.asked_ids)
-        if key is None:
-            return "The assessment bank has no questions on this topic. Make up your own questions instead."
-        if q is None:
-            return "No more assessment questions on this topic. Continue with your own questions."
-        self.asked_ids.add(q["id"])
-        return (
-            f"QUESTION (ask this aloud): {q['question']}\n"
-            f"REFERENCE ANSWER (private, never read before the student answers): {q['answer']}\n"
-            f"HINT (only if stuck): {q['hint']}"
+        if intensity not in db.INTENSITIES:
+            intensity = "standard"
+
+        scores = {
+            "clarity": clarity,
+            "depth": depth,
+            "balance": balance,
+            "awareness": awareness,
+            "authenticity": authenticity,
+            "composure": composure,
+        }
+
+        scores = {
+            k: max(0, min(10, int(v)))
+            for k, v in scores.items()
+        }
+
+        overall, weakest = await asyncio.to_thread(
+            db.save_interview,
+            intensity,
+            scores,
+            topics_covered,
+            summary,
         )
 
-# ================================================================
+        return (
+            f"Saved. Overall {overall} out of 10. "
+            f"Weakest area: {weakest}."
+        )
+
+
+# ============================================================
 # LIVEKIT SERVER
-# ================================================================
+# ============================================================
 
 server = AgentServer()
 
+
+# ============================================================
+# VOICE SESSION
+# ============================================================
 
 @server.rtc_session(agent_name="voice-ai-agent")
 async def my_agent(ctx: JobContext):
@@ -115,16 +185,20 @@ async def my_agent(ctx: JobContext):
         "room": ctx.room.name,
     }
 
+    logger.info(
+        "Starting interview session in room: %s",
+        ctx.room.name,
+    )
 
-    # ============================================================
-    # VOICE SESSION
-    # ============================================================
+    # ========================================================
+    # AGENT SESSION
+    # ========================================================
 
     session = AgentSession(
 
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # SPEECH TO TEXT
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         stt=sarvam.STT(
             language="hi-IN",
@@ -134,14 +208,18 @@ async def my_agent(ctx: JobContext):
             high_vad_sensitivity=True,
         ),
 
-
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # STT CONTEXT
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         stt_context_options=STTContextOptions(
             keyterms=[
                 "LiveKit",
+                "UPSC",
+                "IAS",
+                "IPS",
+                "IFS",
+                "DAF",
                 "Python",
                 "Java",
                 "JavaScript",
@@ -150,16 +228,27 @@ async def my_agent(ctx: JobContext):
                 "artificial intelligence",
                 "algorithms",
                 "data structures",
+                "civil services",
+                "fundamental rights",
+                "Article 21",
+                "Parliament",
+                "Supreme Court",
+                "fiscal deficit",
+                "GDP",
+                "inflation",
+                "governance",
+                "democracy",
+                "federalism",
+                "constitution",
             ],
             keyterm_detection={
                 "enabled": True,
             },
         ),
 
-
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # TEXT TO SPEECH
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         tts=sarvam.TTS(
             target_language_code="hi-IN",
@@ -169,13 +258,11 @@ async def my_agent(ctx: JobContext):
             pace=1.0,
         ),
 
-
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # TURN DETECTION
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         turn_handling=TurnHandlingOptions(
-
             turn_detection=inference.TurnDetector(),
 
             interruption={
@@ -190,10 +277,9 @@ async def my_agent(ctx: JobContext):
         expressive=True,
     )
 
-
-    # ============================================================
+    # ========================================================
     # START SESSION
-    # ============================================================
+    # ========================================================
 
     await session.start(
         agent=Assistant(),
@@ -201,7 +287,6 @@ async def my_agent(ctx: JobContext):
 
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
-
                 noise_cancellation=(
                     ai_coustics.audio_enhancement(
                         model=(
@@ -213,17 +298,32 @@ async def my_agent(ctx: JobContext):
         ),
     )
 
-
-    # ============================================================
+    # ========================================================
     # CONNECT TO ROOM
-    # ============================================================
+    # ========================================================
 
     await ctx.connect()
 
+    logger.info(
+        "Connected to LiveKit room: %s",
+        ctx.room.name,
+    )
 
-# ================================================================
+    # ========================================================
+    # INITIAL GREETING
+    # ========================================================
+
+    await session.generate_reply(
+        instructions=(
+            "Greet the candidate in one or two short sentences as the chairperson of the "
+            "mock UPSC interview board, then follow your setup steps."
+        )
+    )
+
+
+# ============================================================
 # ENTRY POINT
-# ================================================================
+# ============================================================
 
 if __name__ == "__main__":
     cli.run_app(server)
