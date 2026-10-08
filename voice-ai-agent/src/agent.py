@@ -9,7 +9,7 @@ import db
 import questions
 import rag
 
-from prompts import build_instructions, TOOL_RULES, RAG_RULES
+from prompts import build_instructions, TEACHING_RULES, history_block
 
 from livekit.agents import (
     Agent,
@@ -33,181 +33,73 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-
 class Assistant(Agent):
-
     def __init__(self) -> None:
+        profile = db.topic_profile()
         super().__init__(
-            llm=inference.LLM(
-                model="google/gemma-4-31b-it"
-            ),
-            instructions=(
-                build_instructions()
-                + TOOL_RULES
-                + RAG_RULES
-            ),
+            instructions=build_instructions() + TEACHING_RULES + history_block(profile)
         )
-
         self.session_id = uuid.uuid4().hex[:8]
-
         self.asked_ids: set[str] = set()
-
-        self.current: dict | None = None
-
-        # Warm up the RAG system without blocking
-        # the real-time voice pipeline.
-        threading.Thread(
-            target=rag.warmup,
-            daemon=True,
-        ).start()
-
-
-    # ============================================================
-    # QUIZ TOOL
-    # ============================================================
-
-    @function_tool
-    async def get_next_question(
-        self,
-        context: RunContext,
-        topic: str,
-    ) -> str:
-        """Get the next quiz question on a topic the student wants to practice.
-
-        Args:
-            topic: The topic name, for example "photosynthesis"
-                or "newton's laws".
-        """
-
-        key, q = questions.pick_next(
-            topic,
-            self.asked_ids,
-        )
-
-        if key is None:
-            return (
-                f"Unknown topic. Available topics: "
-                f"{', '.join(questions.list_topics())}."
-            )
-
-        if q is None:
-            return (
-                "No more questions on this topic. "
-                "Wrap up using get_session_summary."
-            )
-
-        self.asked_ids.add(q["id"])
-
-        self.current = {
-            "topic": key,
-            **q,
-        }
-
-        return (
-            f"QUESTION (ask this aloud): {q['question']}\n"
-            f"REFERENCE ANSWER (private, do not read aloud): "
-            f"{q['answer']}\n"
-            f"HINT (only if the student is stuck): {q['hint']}"
-        )
-
-
-    # ============================================================
-    # SCORE TOOL
-    # ============================================================
+        threading.Thread(target=rag.warmup, daemon=True).start()
 
     @function_tool
     async def save_score(
-        self,
-        context: RunContext,
-        question: str,
-        score: int,
-        feedback: str,
+        self, context: RunContext, topic: str, question: str, score: int, feedback: str
     ) -> str:
-        """Save the student's score for the question they just answered.
+        """Save the student's score after judging their answer.
 
         Args:
-            question: The question that was asked.
-            score: Score from 0 to 10 based on how correct
-                the answer was.
-            feedback: One short line of feedback for the student.
+            topic: Short topic name in English, for example "photosynthesis" or "binary search".
+            question: The question you asked.
+            score: Score from 0 to 10 based on how correct the answer was.
+            feedback: One short line of feedback.
         """
-
-        score = max(
-            0,
-            min(10, int(score)),
+        score = max(0, min(10, int(score)))
+        topic_key = topic.lower().strip().replace(" ", "_")
+        await asyncio.to_thread(
+            db.save_score, self.session_id, topic_key, None, question, score, feedback
         )
-
-        cur = self.current or {}
-
-        db.save_score(
-            self.session_id,
-            cur.get("topic"),
-            cur.get("id"),
-            question,
-            score,
-            feedback,
-        )
-
         return "Saved."
 
-
-    # ============================================================
-    # SESSION SUMMARY TOOL
-    # ============================================================
+    @function_tool
+    async def get_session_summary(self, context: RunContext) -> str:
+        """Get how many questions the student answered this session and their average score."""
+        s = await asyncio.to_thread(db.session_summary, self.session_id)
+        return f"Answered {s['answered']} questions, average {s['average']} out of 10."
 
     @function_tool
-    async def get_session_summary(
-        self,
-        context: RunContext,
-    ) -> str:
-        """Get the number of questions answered and average score."""
-
-        s = db.session_summary(
-            self.session_id
-        )
-
-        return (
-            f"Answered {s['answered']} questions, "
-            f"average score {s['average']} out of 10."
-        )
-
-
-    # ============================================================
-    # RAG / STUDY NOTES TOOL
-    # ============================================================
-
-    @function_tool
-    async def search_notes(
-        self,
-        context: RunContext,
-        query: str,
-    ) -> str:
-        """Search study notes for facts to explain a concept or check an answer.
+    async def search_notes(self, context: RunContext, query: str) -> str:
+        """Search the student's own uploaded study notes. Use ONLY when the student
+        refers to their notes, book or syllabus.
 
         Args:
-            query: A short search query written in English,
-                even if the student spoke Hindi.
+            query: A short search query written in ENGLISH.
         """
-
-        # Run RAG search in a worker thread so that
-        # embedding/search does not block real-time audio.
-        hits = await asyncio.to_thread(
-            rag.search,
-            query,
-        )
-
+        hits = await asyncio.to_thread(rag.search, query)
         if not hits:
-            return (
-                "NO RELEVANT NOTES FOUND. "
-                "Tell the student you are not sure, "
-                "and do not guess."
-            )
+            return "The student's notes do not cover this. Answer from your own general knowledge instead."
+        return "\n\n".join(f"[{h['source']}] {h['text']}" for h in hits)
 
-        return "\n\n".join(
-            f"[{h['source']}] {h['text']}"
-            for h in hits
+    @function_tool
+    async def get_assessment_question(self, context: RunContext, topic: str) -> str:
+        """Get a fixed question from the standard assessment bank. Use ONLY when the
+        student asks for a formal test or exam-style round.
+
+        Args:
+            topic: The topic name, for example "photosynthesis" or "newton's laws".
+        """
+        key, q = questions.pick_next(topic, self.asked_ids)
+        if key is None:
+            return "The assessment bank has no questions on this topic. Make up your own questions instead."
+        if q is None:
+            return "No more assessment questions on this topic. Continue with your own questions."
+        self.asked_ids.add(q["id"])
+        return (
+            f"QUESTION (ask this aloud): {q['question']}\n"
+            f"REFERENCE ANSWER (private, never read before the student answers): {q['answer']}\n"
+            f"HINT (only if stuck): {q['hint']}"
         )
-
 
 # ================================================================
 # LIVEKIT SERVER

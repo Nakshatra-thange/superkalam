@@ -49,5 +49,20 @@ def session_summary(session_id: str) -> dict:
         ).fetchone()
     return {"answered": row["n"], "average": round(row["avg"], 1) if row["avg"] is not None else None}
 
+def topic_profile(limit: int = 8) -> list[tuple[str, int, float]]:
+    """Per-topic history across all sessions: (topic, answers, average score)."""
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT topic, COUNT(*) AS n, AVG(score) AS avg FROM scores "
+            "WHERE topic IS NOT NULL GROUP BY topic "
+            "ORDER BY MAX(created_at) DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    return [
+        (r["topic"], r["n"], round(r["avg"], 1))
+        for r in rows
+    ]
+
 
 init_db()
