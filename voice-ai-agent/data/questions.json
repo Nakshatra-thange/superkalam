@@ -1,0 +1,75 @@
+{
+    "topics": {
+      "photosynthesis": {
+        "keywords": ["photosynthesis", "prakash sanshleshan", "plants food", "chlorophyll"],
+        "questions": [
+          {
+            "id": "ph1",
+            "question": "What is photosynthesis?",
+            "answer": "The process by which green plants use sunlight, carbon dioxide and water to make glucose (food) and release oxygen.",
+            "hint": "Think about how plants make their own food."
+          },
+          {
+            "id": "ph2",
+            "question": "Which green pigment in leaves captures sunlight, and where is it found?",
+            "answer": "Chlorophyll, found in chloroplasts.",
+            "hint": "It is the reason leaves look green."
+          },
+          {
+            "id": "ph3",
+            "question": "Through which tiny pores on the leaf does a plant take in carbon dioxide?",
+            "answer": "Stomata.",
+            "hint": "These pores are mostly on the underside of the leaf."
+          },
+          {
+            "id": "ph4",
+            "question": "What are the raw materials and the products of photosynthesis?",
+            "answer": "Raw materials: carbon dioxide and water, with sunlight. Products: glucose and oxygen.",
+            "hint": "Plants take in one gas and release another."
+          },
+          {
+            "id": "ph5",
+            "question": "In which part of the cell does photosynthesis take place?",
+            "answer": "In the chloroplasts.",
+            "hint": "It is a green organelle."
+          }
+        ]
+      },
+      "newtons_laws": {
+        "keywords": ["newton", "laws of motion", "inertia", "force and motion"],
+        "questions": [
+          {
+            "id": "nl1",
+            "question": "State Newton's first law of motion.",
+            "answer": "An object stays at rest or keeps moving in a straight line at constant speed unless an unbalanced force acts on it.",
+            "hint": "It is also called the law of inertia."
+          },
+          {
+            "id": "nl2",
+            "question": "What does Newton's second law say? Give the formula.",
+            "answer": "Force equals mass times acceleration, F = m a. The acceleration is in the direction of the force.",
+            "hint": "A bigger force on the same mass gives a bigger acceleration."
+          },
+          {
+            "id": "nl3",
+            "question": "State Newton's third law and give one example.",
+            "answer": "Every action has an equal and opposite reaction, acting on different bodies. Example: a rocket pushes gas down and the gas pushes the rocket up.",
+            "hint": "Think about how you push the ground back while walking."
+          },
+          {
+            "id": "nl4",
+            "question": "What is inertia, and which kind of object has more of it?",
+            "answer": "Inertia is the tendency of a body to resist a change in its state of rest or motion. A body with more mass has more inertia.",
+            "hint": "Is it harder to push an empty cart or a full cart?"
+          },
+          {
+            "id": "nl5",
+            "question": "What force is needed to accelerate a 2 kilogram mass at 3 metres per second squared?",
+            "answer": "6 newtons, because F = m a = 2 x 3.",
+            "hint": "Use force equals mass times acceleration."
+          }
+        ]
+      }
+    }
+  }
+
