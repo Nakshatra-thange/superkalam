@@ -1,10 +1,16 @@
 import asyncio
+import json
 import logging
+import uuid
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 import db
+from evaluator import evaluate
 from prompts import build_instructions
+from session_log import attach_logging, history_to_turns
 
 from livekit.agents import (
     Agent,
@@ -30,7 +36,11 @@ from livekit.plugins import sarvam
 
 load_dotenv(".env.local")
 
-logger = logging.getLogger("agent")
+logger = logging.getLogger("upsc-board")
+
+EVALS_DIR = (
+    Path(__file__).resolve().parent.parent / "data" / "evals"
+)
 
 
 # ============================================================
@@ -39,13 +49,14 @@ logger = logging.getLogger("agent")
 
 class Assistant(Agent):
     def __init__(self) -> None:
+
         super().__init__(
-            # IMPORTANT:
-            # Keep this because your AgentSession does not currently
-            # configure an LLM separately.
+            # Keep this because your current AgentSession
+            # does not configure an LLM separately.
             llm=inference.LLM(
                 model="google/gemma-4-31b-it"
             ),
+
             instructions=build_instructions(
                 db.get_profile(),
                 db.recent_interviews(),
@@ -53,8 +64,10 @@ class Assistant(Agent):
             ),
         )
 
+        self.session_id = uuid.uuid4().hex[:8]
+
     # ========================================================
-    # SAVE CANDIDATE PROFILE
+    # SAVE PROFILE
     # ========================================================
 
     @function_tool
@@ -103,67 +116,148 @@ class Assistant(Agent):
         return "Saved."
 
     # ========================================================
-    # SAVE INTERVIEW RESULT
+    # FINISH INTERVIEW
     # ========================================================
 
     @function_tool
-    async def save_interview_result(
+    async def finish_interview(
         self,
         context: RunContext,
         intensity: str,
-        clarity: int,
-        depth: int,
-        balance: int,
-        awareness: int,
-        authenticity: int,
-        composure: int,
-        topics_covered: str,
-        summary: str,
     ) -> str:
-        """Save the evaluation at the end of the interview. Call this before giving spoken feedback.
+        """Evaluate and save the interview. Call once at the end, after telling the candidate
+        the board needs a moment to deliberate.
 
         Args:
             intensity: gentle, standard or tough.
-            clarity: Score 0 to 10 for structured, to-the-point answers.
-            depth: Score 0 to 10 for analytical depth.
-            balance: Score 0 to 10 for seeing multiple sides.
-            awareness: Score 0 to 10 for knowledge of background, state and current issues.
-            authenticity: Score 0 to 10 for honesty and not bluffing.
-            composure: Score 0 to 10 for calm and confidence under cross-questioning.
-            topics_covered: Short comma-separated list of topics asked about.
-            summary: One or two sentences summarising performance.
         """
+
+        # ----------------------------------------------------
+        # Get current session
+        # ----------------------------------------------------
+
+        session = (
+            getattr(context, "session", None)
+            or self.session
+        )
+
+        # ----------------------------------------------------
+        # Extract conversation history
+        # ----------------------------------------------------
+
+        turns, _ = history_to_turns(
+            session.history.to_dict()
+        )
+
+        # ----------------------------------------------------
+        # Evaluate interview
+        # ----------------------------------------------------
+
+        try:
+            result = await evaluate(turns)
+
+        except Exception:
+            logger.exception(
+                "evaluation failed"
+            )
+
+            return (
+                "Evaluation failed. "
+                "Give brief qualitative feedback only "
+                "and do not mention any scores."
+            )
+
+        # ----------------------------------------------------
+        # Check whether there were enough answers
+        # ----------------------------------------------------
+
+        if result.get("too_short"):
+            return (
+                "Too few answers to evaluate. "
+                "Tell the candidate you need a few more answers "
+                "and continue the interview."
+            )
+
+        # ----------------------------------------------------
+        # Normalize intensity
+        # ----------------------------------------------------
 
         intensity = intensity.lower().strip()
 
         if intensity not in db.INTENSITIES:
             intensity = "standard"
 
-        scores = {
-            "clarity": clarity,
-            "depth": depth,
-            "balance": balance,
-            "awareness": awareness,
-            "authenticity": authenticity,
-            "composure": composure,
-        }
-
-        scores = {
-            k: max(0, min(10, int(v)))
-            for k, v in scores.items()
-        }
+        # ----------------------------------------------------
+        # Save interview to database
+        # ----------------------------------------------------
 
         overall, weakest = await asyncio.to_thread(
             db.save_interview,
             intensity,
-            scores,
-            topics_covered,
-            summary,
+            result["scores"],
+            ", ".join(result["topics"]),
+            result["summary"],
         )
 
+        # ----------------------------------------------------
+        # Save detailed evaluation JSON
+        # ----------------------------------------------------
+
+        EVALS_DIR.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        record = {
+            "created_at": datetime.now().isoformat(
+                timespec="seconds"
+            ),
+            "intensity": intensity,
+            "overall": overall,
+            "weakest": weakest,
+            **result,
+        }
+
+        eval_path = (
+            EVALS_DIR
+            / f"{self.session_id}.json"
+        )
+
+        eval_path.write_text(
+            json.dumps(
+                record,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        logger.info(
+            "Interview evaluation saved: %s",
+            eval_path,
+        )
+
+        # ----------------------------------------------------
+        # Format factual slips
+        # ----------------------------------------------------
+
+        slips = "; ".join(
+            f"{s.get('claim', '')} -> "
+            f"{s.get('correction', '')}"
+            for s in result["factual_slips"]
+        ) or "none"
+
+        # ----------------------------------------------------
+        # Return evaluation to LLM
+        # ----------------------------------------------------
+
         return (
-            f"Saved. Overall {overall} out of 10. "
-            f"Weakest area: {weakest}."
+            f"EVALUATION SAVED. "
+            f"Overall {overall} out of 10. "
+            f"Weakest area: {weakest}. "
+            f"Strengths: {'; '.join(result['strengths'])}. "
+            f"Improvements: {'; '.join(result['improvements'])}. "
+            f"Factual slips: {slips}."
         )
 
 
@@ -178,7 +272,9 @@ server = AgentServer()
 # VOICE SESSION
 # ============================================================
 
-@server.rtc_session(agent_name="voice-ai-agent")
+@server.rtc_session(
+    agent_name="voice-ai-agent"
+)
 async def my_agent(ctx: JobContext):
 
     ctx.log_context_fields = {
@@ -186,7 +282,7 @@ async def my_agent(ctx: JobContext):
     }
 
     logger.info(
-        "Starting interview session in room: %s",
+        "Starting UPSC interview in room: %s",
         ctx.room.name,
     )
 
@@ -197,7 +293,7 @@ async def my_agent(ctx: JobContext):
     session = AgentSession(
 
         # ----------------------------------------------------
-        # SPEECH TO TEXT
+        # SARVAM STT
         # ----------------------------------------------------
 
         stt=sarvam.STT(
@@ -247,7 +343,7 @@ async def my_agent(ctx: JobContext):
         ),
 
         # ----------------------------------------------------
-        # TEXT TO SPEECH
+        # SARVAM TTS
         # ----------------------------------------------------
 
         tts=sarvam.TTS(
@@ -274,15 +370,25 @@ async def my_agent(ctx: JobContext):
             },
         ),
 
+        # ----------------------------------------------------
+        # EXPRESSIVE VOICE
+        # ----------------------------------------------------
+
         expressive=True,
     )
+
+    # ========================================================
+    # CREATE ASSISTANT
+    # ========================================================
+
+    assistant = Assistant()
 
     # ========================================================
     # START SESSION
     # ========================================================
 
     await session.start(
-        agent=Assistant(),
+        agent=assistant,
         room=ctx.room,
 
         room_options=room_io.RoomOptions(
@@ -299,7 +405,17 @@ async def my_agent(ctx: JobContext):
     )
 
     # ========================================================
-    # CONNECT TO ROOM
+    # ATTACH SESSION LOGGING
+    # ========================================================
+
+    attach_logging(
+        ctx,
+        session,
+        assistant.session_id,
+    )
+
+    # ========================================================
+    # CONNECT
     # ========================================================
 
     await ctx.connect()
@@ -315,8 +431,9 @@ async def my_agent(ctx: JobContext):
 
     await session.generate_reply(
         instructions=(
-            "Greet the candidate in one or two short sentences as the chairperson of the "
-            "mock UPSC interview board, then follow your setup steps."
+            "Greet the candidate in one or two short sentences "
+            "as the chairperson of the mock UPSC interview board, "
+            "then follow your setup steps."
         )
     )
 

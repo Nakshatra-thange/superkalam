@@ -1,0 +1,44 @@
+{
+  "session_id": "d805055c",
+  "source": "live",
+  "duration_s": 59,
+  "turns": [
+    {
+      "role": "assistant",
+      "text": "Hello. I am the Chairperson of the board for this mock UPSC Personality Test. Before we begin, would you prefer to conduct this interview in English or Hindi?"
+    },
+    {
+      "role": "user",
+      "text": "हिंदी।"
+    },
+    {
+      "role": "assistant",
+      "text": "Theek hai, hum Hindi mein baat karenge. Sabse pehle, kya aap mujhe apna naam bata sakte hain?"
+    },
+    {
+      "role": "user",
+      "text": "जी नक्षत्र।"
+    },
+    {
+      "role": "assistant",
+      "text": "Namaste Nakshatra. Aap kis shehar ya rajya se belong karte hain?"
+    }
+  ],
+  "tool_calls": [],
+  "latency": {
+    "eou_delay": [
+      2.5,
+      0.464
+    ],
+    "llm_ttft": [
+      0.717,
+      0.845,
+      0.581
+    ],
+    "tts_ttfb": [
+      0.287,
+      0.214,
+      0.214
+    ]
+  }
+}
